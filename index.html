@@ -80,6 +80,32 @@
   #flip-btn:hover {
     background: rgba(0, 0, 0, 0.8);
   }
+  #dropzone {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 20px;
+    border: 3px dashed rgba(255, 255, 255, 0.6);
+    pointer-events: none;
+  }
+  #dropzone.active { display: flex; }
+  #drop-hint {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    z-index: 10;
+    color: #888;
+    font-size: 11px;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 6px 10px;
+    border-radius: 6px;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -93,11 +119,13 @@
     <div id="stats"></div>
   </div>
   <button id="flip-btn" title="위아래가 뒤집혀 보이면 눌러 주세요">위아래 뒤집기</button>
+  <div id="drop-hint">.ply / .compressed.ply / .sog / .spz / .splat / .ksplat 파일을 여기로 끌어다 놓아도 됩니다</div>
+  <div id="dropzone">파일을 놓으면 새로 그립니다</div>
 </div>
 
 <!-- 여기서 파일 이름을 바꿀 수 있습니다 -->
 <script>
-  window.SPLAT_FILE = "room.sog";
+  window.SPLAT_FILE = "scene.sog";
 </script>
 
 <script type="importmap">
@@ -137,8 +165,9 @@ function setStep(name, state, hint) {
   }
 }
 
-// 확장자 -> Spark 내부 형식 이름 대응표
+// 확장자 -> Spark 내부 형식 이름 대응표. 여러 토막짜리 확장자(.compressed.ply)를 먼저 본다.
 const FILE_TYPE_MAP = {
+  "compressed.ply": "ply",
   ply: "ply",
   splat: "splat",
   ksplat: "ksplat",
@@ -147,7 +176,11 @@ const FILE_TYPE_MAP = {
 };
 
 function guessFileType(filename) {
-  const ext = filename.split(".").pop().toLowerCase();
+  const lower = filename.toLowerCase();
+  for (const suffix of Object.keys(FILE_TYPE_MAP)) {
+    if (lower.endsWith("." + suffix)) return FILE_TYPE_MAP[suffix];
+  }
+  const ext = lower.split(".").pop();
   return FILE_TYPE_MAP[ext] || ext;
 }
 
@@ -184,37 +217,58 @@ document.getElementById("flip-btn").addEventListener("click", () => {
   splatMesh.rotation.z = flipped ? Math.PI : 0;
 });
 
-async function loadSplat() {
-  const filename = window.SPLAT_FILE;
+function resetSteps() {
+  for (const name of ["fetch", "parse", "fit"]) setStep(name, "pending");
+  statsEl.innerHTML = "";
+}
+
+// source: { kind: "url", url } 또는 { kind: "bytes", bytes, filename }
+async function loadSplat(source) {
+  const filename = source.kind === "url" ? source.url : source.filename;
   const fileType = guessFileType(filename);
 
   let bytes, downloadMs, fileSizeMB;
-  try {
-    const t0 = performance.now();
-    const res = await fetch(filename);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = await res.arrayBuffer();
-    bytes = new Uint8Array(buf);
-    downloadMs = performance.now() - t0;
+  if (source.kind === "url") {
+    try {
+      const t0 = performance.now();
+      const res = await fetch(source.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      bytes = new Uint8Array(buf);
+      downloadMs = performance.now() - t0;
+      fileSizeMB = bytes.byteLength / 1e6;
+      setStep("fetch", "ok");
+    } catch (e) {
+      setStep(
+        "fetch",
+        "fail",
+        `'${filename}' 파일을 못 받았습니다. 같은 폴더에 있는지, 이름이 맞는지 보세요. (${e.message})`
+      );
+      return;
+    }
+  } else {
+    bytes = source.bytes;
+    downloadMs = source.readMs ?? 0;
     fileSizeMB = bytes.byteLength / 1e6;
     setStep("fetch", "ok");
-  } catch (e) {
-    setStep(
-      "fetch",
-      "fail",
-      `'${filename}' 파일을 못 받았습니다. 같은 폴더에 있는지, 이름이 맞는지 보세요. (${e.message})`
-    );
-    return;
+  }
+
+  if (splatMesh) {
+    scene.remove(splatMesh);
+    splatMesh.dispose?.();
+    splatMesh = null;
   }
 
   try {
     splatMesh = new SplatMesh({ fileBytes: bytes, fileType });
     await splatMesh.initialized;
     scene.add(splatMesh);
+    flipped = false;
     setStep("parse", "ok");
 
     const count = splatMesh.numSplats ?? "?";
     statsEl.innerHTML =
+      `파일: ${filename}<br>` +
       `파일 크기: ${fileSizeMB.toFixed(2)}MB<br>` +
       `받는 시간: ${(downloadMs / 1000).toFixed(2)}초<br>` +
       `알갱이 개수: ${count}`;
@@ -255,7 +309,41 @@ async function loadSplat() {
   }
 }
 
-loadSplat();
+loadSplat({ kind: "url", url: window.SPLAT_FILE });
+
+const dropzone = document.getElementById("dropzone");
+let dragDepth = 0;
+
+window.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  dragDepth++;
+  dropzone.classList.add("active");
+});
+window.addEventListener("dragover", (e) => {
+  e.preventDefault();
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) dropzone.classList.remove("active");
+});
+window.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  dropzone.classList.remove("active");
+  const file = e.dataTransfer.files?.[0];
+  if (!file) return;
+
+  resetSteps();
+  const t0 = performance.now();
+  const buf = await file.arrayBuffer();
+  const readMs = performance.now() - t0;
+  await loadSplat({
+    kind: "bytes",
+    bytes: new Uint8Array(buf),
+    filename: file.name,
+    readMs,
+  });
+});
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
