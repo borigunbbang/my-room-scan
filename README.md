@@ -1,7 +1,8 @@
 # 고른 공간
 
 ## 주소
-(저장소 생성 후 채움) https://아이디.github.io/저장소이름/
+https://borigunbbang.github.io/my-room-scan/
+저장소: https://github.com/borigunbbang/my-room-scan
 
 ## 어디를 골랐나
 - 책상, 모니터, 화장대, 책장이 있는 개인 침실입니다.
